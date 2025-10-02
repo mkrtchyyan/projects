@@ -1,0 +1,109 @@
+
+CREATE OR REPLACE PROCEDURE BL_CL.LOAD_CE_PRODUCTS()
+LANGUAGE PLPGSQL
+AS
+$$
+DECLARE
+    ROWS_INSERTED INTEGER := 0;
+BEGIN 
+with all_products as (
+	 SELECT DISTINCT 
+           "PRODUCT_ID",
+            "PRODUCT_DESC",
+            "PROMO_FLAG",
+            "PROMO_DISCOUNT",
+            "BASE_PRICE",
+            "IS_LIMITED_EDITION",
+            "PRODUCT_TYPE",
+            "PRODUCT_CATEGORY",
+            "PRODUCT_GROUP",
+            "EVENT_DT"::BIGINT,
+            'SA_ONLINE_SALES' AS "SOURCE_SYSTEM",
+            'SRC_ONLINE_COFFEE_SHOP_TRANSACTIONS' AS "SOURCE_ENTITY"
+        FROM SA_ONLINE_SALES.SRC_ONLINE_COFFEE_SHOP_TRANSACTIONS
+        UNION ALL
+        SELECT distinct
+            "PRODUCT_ID",
+            "PRODUCT_DESC",
+            "PROMO_FLAG",
+            "PROMO_DISCOUNT",
+            "BASE_PRICE",
+            "IS_LIMITED_EDITION",
+            "PRODUCT_TYPE",
+            "PRODUCT_CATEGORY",
+            "PRODUCT_GROUP",
+            "EVENT_DT"::BIGINT,
+            'SA_OFFLINE_SALES' AS "SOURCE_SYSTEM",
+            'SRC_OFFLINE_COFFEE_SHOP_TRANSACTIONS' AS "SOURCE_ENTITY"
+        FROM SA_OFFLINE_SALES.SRC_OFFLINE_COFFEE_SHOP_TRANSACTIONS),
+mapping_joined as (select distinct
+						MP."PRODUCT_ID",
+			            MP."PRODUCT_DESC",
+			            S."PROMO_FLAG",
+			            S."PROMO_DISCOUNT",
+			            S."BASE_PRICE",
+			            S."IS_LIMITED_EDITION",
+			            S."PRODUCT_TYPE",
+			            S."PRODUCT_CATEGORY",
+			            S."PRODUCT_GROUP",
+			            S."EVENT_DT"::BIGINT,
+						MP."SOURCE_ENTITY",
+						MP."SOURCE_SYSTEM"
+						from all_products s
+					   LEFT JOIN BL_CL.T_MAP_PRODUCTS MP 
+				        ON S."PRODUCT_ID" = MP."PRODUCT_SRC_ID"
+				       AND S."SOURCE_SYSTEM" = MP."SOURCE_SYSTEM"
+				       AND S."SOURCE_ENTITY" = MP."SOURCE_ENTITY"),
+ranked_products as (select *, row_number() over (partition by "PRODUCT_ID"  order by "EVENT_DT" DESC) AS rn from mapping_joined)
+	INSERT INTO BL_3NF.CE_PRODUCTS (
+    "PRODUCT_ID",
+    "PRODUCT_SRC_ID",
+    "PRODUCT_TYPE_ID",
+    "PRODUCT_DESC",
+    "PROMO_FLAG",
+    "PROMO_DISCOUNT",
+    "BASE_PRICE",
+    "IS_LIMITED_EDITION",
+    "TA_INSERT_DT",
+    "SOURCE_SYSTEM",
+    "SOURCE_ENTITY"
+)
+SELECT DISTINCT
+    NEXTVAL('BL_3NF.CE_PRODUCTS_SEQ'),                 
+    P."PRODUCT_ID",                                     
+    COALESCE(PT."PRODUCT_TYPE_ID", -1),                  
+    P."PRODUCT_DESC",                                  
+    P."PROMO_FLAG"::BOOLEAN,                           
+    P."PROMO_DISCOUNT"::DECIMAL(6,2),
+    P."BASE_PRICE"::DECIMAL(12,2),
+    P."IS_LIMITED_EDITION"::BOOLEAN,
+    CURRENT_TIMESTAMP,                                  
+    'BL_CL',
+    'T_MAP_PRODUCTS'
+FROM ranked_products p
+LEFT JOIN BL_3NF.CE_PRODUCT_TYPES PT 
+  ON PT."PRODUCT_TYPE_SRC_ID" = P."PRODUCT_TYPE" || ' | ' || P."PRODUCT_CATEGORY" || ' | ' || P."PRODUCT_GROUP"
+	AND PT."SOURCE_SYSTEM"=P."SOURCE_SYSTEM"
+	AND PT."SOURCE_ENTITY"=P."SOURCE_ENTITY"
+where rn =1  
+ON CONFLICT("PRODUCT_SRC_ID", "SOURCE_SYSTEM", "SOURCE_ENTITY") DO 
+UPDATE SET  
+    "PRODUCT_TYPE_ID" = excluded."PRODUCT_TYPE_ID",
+    "PRODUCT_DESC" = excluded."PRODUCT_DESC",
+    "PROMO_FLAG" = excluded."PROMO_FLAG",
+    "PROMO_DISCOUNT" = excluded."PROMO_DISCOUNT",
+    "BASE_PRICE" = excluded."BASE_PRICE",
+    "IS_LIMITED_EDITION" = excluded."IS_LIMITED_EDITION"
+WHERE 
+    (BL_3NF.CE_PRODUCTS."PRODUCT_TYPE_ID" IS DISTINCT FROM excluded."PRODUCT_TYPE_ID" OR
+     BL_3NF.CE_PRODUCTS."PRODUCT_DESC" IS DISTINCT FROM excluded."PRODUCT_DESC" OR
+     BL_3NF.CE_PRODUCTS."PROMO_FLAG" IS DISTINCT FROM excluded."PROMO_FLAG" OR
+     BL_3NF.CE_PRODUCTS."PROMO_DISCOUNT" IS DISTINCT FROM excluded."PROMO_DISCOUNT" OR
+     BL_3NF.CE_PRODUCTS."BASE_PRICE" IS DISTINCT FROM excluded."BASE_PRICE" OR
+     BL_3NF.CE_PRODUCTS."IS_LIMITED_EDITION" IS DISTINCT FROM excluded."IS_LIMITED_EDITION");
+GET DIAGNOSTICS ROWS_INSERTED = ROW_COUNT;
+  CALL BL_CL.LOG_ETL('LOAD_CE_PRODUCTS', ROWS_INSERTED, 'SUCCESS ');
+EXCEPTION  WHEN OTHERS THEN
+    CALL BL_CL.LOG_ETL('LOAD_CE_PRODUCTS', 0, 'ERROR: ' || SQLERRM);
+END;
+$$;
